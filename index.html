@@ -499,16 +499,10 @@ window.adminLogin = async function() {
   btn.textContent = "جاري التحقق...";
   btn.disabled = true;
 
-  // check local admin accounts first, then try Supabase Auth
+  // Local access does not call Supabase Auth repeatedly.
   const localAdmin = ADMIN_ACCOUNTS[email.toLowerCase()];
   if(localAdmin && localAdmin.pass === pass) {
-    let supabaseUser = null;
-    if(SB.ok) {
-      const { data, error } = await SB.client.auth.signInWithPassword({ email, password:pass });
-      if(!error) supabaseUser = data.user;
-      else console.warn("[Supabase admin login]", error.message);
-    }
-    A.user = { email, name: localAdmin.name, role: localAdmin.role, uid: supabaseUser?.id };
+    A.user = { email, name: localAdmin.name, role: localAdmin.role, uid: null };
     showAdminApp();
     btn.textContent = "دخول للوحة الإدارة";
     btn.disabled = false;
@@ -533,7 +527,9 @@ window.adminLogin = async function() {
         errEl.hidden = false;
       }
     } catch(e) {
-      errEl.textContent = "بيانات الدخول غير صحيحة";
+      errEl.textContent = e?.status === 429 || e?.message?.toLowerCase().includes("rate limit")
+        ? "تم تجاوز حد محاولات الدخول مؤقتاً، انتظر قليلاً ثم حاول مرة أخرى"
+        : "بيانات الدخول غير صحيحة";
       errEl.hidden = false;
     }
   } else {
@@ -1162,7 +1158,8 @@ window.updateImgPreview = function() {
   const prev = document.getElementById("imgPreview");
   prev.innerHTML = productImageUrls.map((url, index) => `
     <div class="relative aspect-square">
-      <img src="${esc(url)}" class="w-full h-full rounded-xl object-cover border" style="border-color:rgba(201,169,97,.2)" onerror="this.style.opacity='.2'">
+      <img src="${esc(url)}" alt="صورة المنتج ${index + 1}" class="w-full h-full rounded-xl object-cover border" style="border-color:rgba(201,169,97,.2)" onerror="this.style.display='none';this.nextElementSibling.hidden=false">
+      <div hidden class="w-full h-full rounded-xl border flex items-center justify-center text-center text-[.55rem] p-2" style="border-color:rgba(180,60,60,.4);color:#E07070">الرابط لا يعرض صورة عامة</div>
       <button type="button" onclick="removeProductImage(${index})" class="absolute top-1 end-1 w-6 h-6 rounded-full text-xs" style="background:rgba(180,60,60,.9);color:#fff">×</button>
     </div>`).join("");
 };
@@ -1181,12 +1178,21 @@ document.getElementById("pImageUrls").addEventListener("input", event => {
   updateImgPreview();
 });
 
+function isPublicImageUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch(e) { return false; }
+}
+
 window.saveProduct = async function() {
   const saveButton = document.getElementById("saveProductBtn");
   const pid = document.getElementById("editProductId").value || "au_" + uid();
   const price = parseFloat(document.getElementById("pPrice").value)||0;
 
   if(!productImageUrls.length) return toast("الرجاء إضافة رابط صورة واحدة على الأقل", "err");
+  const invalidImageUrl = productImageUrls.find(url => !isPublicImageUrl(url));
+  if(invalidImageUrl) return toast("رابط الصورة غير صالح. استخدم رابط https عام، وليس blob أو رابط تيليجرام مؤقت.", "err");
   if(!document.getElementById("pNameEn").value.trim()) return toast("الرجاء إدخال الاسم بالإنجليزية", "err");
   if(!document.getElementById("pNameAr").value.trim()) return toast("الرجاء إدخال الاسم بالعربية", "err");
   if(!price) return toast("الرجاء إدخال السعر", "err");
