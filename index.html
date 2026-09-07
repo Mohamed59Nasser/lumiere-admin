@@ -413,6 +413,7 @@ const A = {
   editPid: null,
   stats: { revenue: 0, orders: 0, customers: 0, products: 0 }
 };
+let realtimeListenersStarted = false;
 
 /* ─── 4. HELPERS ─── */
 const money = n => new Intl.NumberFormat('ar-EG-u-nu-latn').format(Math.round(n)) + " جنيه";
@@ -528,6 +529,7 @@ function showAdminApp() {
   document.getElementById("adminName").textContent = A.user.name;
   document.getElementById("adminEmailDisplay").textContent = A.user.email;
   loadAllData();
+  if(A.user.uid) startRealtimeListeners();
   startClock();
 }
 
@@ -544,13 +546,36 @@ async function loadProducts() {
   // Try Firebase first
   let data = await dbRead("products");
   if(data) {
-    A.products = Object.entries(data).map(([key, val]) => ({...val, _key: key}));
+    A.products = Object.entries(data)
+      .filter(([, val]) => val)
+      .map(([key, val]) => normalizeProduct(val, key));
   } else {
     // Fallback: load from client-site static catalog (copy from storefront)
     A.products = getStaticProducts();
   }
   A.stats.products = A.products.length;
   document.getElementById("prodBadge").textContent = A.products.length;
+}
+
+function normalizeProduct(product, key) {
+  if(product.en || product.ar) return {...product, id:String(product.id ?? key)};
+  const name = product.name || "منتج بدون اسم";
+  const description = product.description || "";
+  const categoryMap = { "سلاسل":"necklaces", "حلقان":"earrings", "أساور":"bracelets", "خواتم":"rings" };
+  return {
+    ...product,
+    id: String(product.id ?? key),
+    cat: categoryMap[product.category] || product.category || "rings",
+    price: Number(product.price) || 0,
+    old: Number(product.old) || 0,
+    rate: Number(product.rate) || 0,
+    rev: Number(product.rev) || 0,
+    feat: product.feat ? 1 : 0,
+    en: { n:name, s:description, d:description },
+    ar: { n:name, s:description, d:description },
+    img: product.imageUrl ? [product.imageUrl] : [],
+    sizes: Array.isArray(product.sizes) ? product.sizes : []
+  };
 }
 
 function getStaticProducts() {
@@ -630,10 +655,11 @@ async function loadSettings() {
 }
 
 /* ─── 8. TABS ─── */
-window.switchTab = function(tab) {
+window.switchTab = function(tab, navElement) {
   A.tab = tab;
   document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
-  event.currentTarget.classList.add("active");
+  const activeNav = navElement || document.querySelector(`.nav-item[onclick*="'${tab}'"]`);
+  if(activeNav) activeNav.classList.add("active");
   const titles = { dashboard:"لوحة التحكم", products:"إدارة المنتجات", orders:"إدارة الطلبات",
                    customers:"العملاء", coupons:"الكوبونات", settings:"الإعدادات" };
   document.getElementById("pageTitle").textContent = titles[tab]||tab;
@@ -1319,7 +1345,8 @@ window.createAdmin = async function() {
 
 /* ─── 19. REAL-TIME LISTENERS ─── */
 function startRealtimeListeners() {
-  if(!FB.ok) return;
+  if(!FB.ok || !A.user?.uid || realtimeListenersStarted) return;
+  realtimeListenersStarted = true;
   // Listen for new orders in real-time
   try {
     dbOnValue(dbRef(FB.db, "users"), snap => {
@@ -1351,7 +1378,9 @@ function startRealtimeListeners() {
     // Listen for product changes
     dbOnValue(dbRef(FB.db, "products"), snap => {
       if(snap.exists()) {
-        A.products = Object.entries(snap.val()).map(([key,val])=>({...val,_key:key}));
+        A.products = Object.entries(snap.val())
+          .filter(([, val]) => val)
+          .map(([key, val]) => normalizeProduct(val, key));
         A.stats.products = A.products.length;
         document.getElementById("prodBadge").textContent = A.products.length;
         if(A.tab==="products") renderTab();
@@ -1384,11 +1413,6 @@ document.getElementById("adminPass").addEventListener("keydown", e => {
 // Expose render functions globally
 window.renderTab = renderTab;
 window.switchTab = window.switchTab;
-
-/* Start */
-if(FB.ok) {
-  startRealtimeListeners();
-}
 </script>
 </body>
 </html>
