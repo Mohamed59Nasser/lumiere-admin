@@ -351,52 +351,18 @@ label.lbl { font-size: .68rem; letter-spacing: .15em; text-transform: uppercase;
 <script type="module">
 /* ══════════════════════════════════════════════
   LUMIÈRE ADMIN PANEL
-   Firebase Realtime DB · Products · Orders · Customers
+   Supabase · Products · Orders · Customers
    ══════════════════════════════════════════════ */
 
-/* ─── 1. FIREBASE SAME CONFIG كموقع العملاء ─── */
-const V = "https://www.gstatic.com/firebasejs/10.12.2";
-let initializeApp, getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-    onAuthStateChanged, signOut, getDatabase, dbRef, dbSet, dbGet, dbOnValue,
-    dbPush, dbRemove, dbUpdate, SDK_OK = false;
+const SUPABASE_URL = "https://cbawcazlprthavxmjtcu.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_PHWD4w3wzQlJWVMefnkb0Q_BC0yXyNP";
+let createClient, SB = { client:null, ok:false };
 
 try {
-  const [A, U, D] = await Promise.all([
-    import(`${V}/firebase-app.js`),
-    import(`${V}/firebase-auth.js`),
-    import(`${V}/firebase-database.js`)
-  ]);
-  ({ initializeApp } = A);
-  ({ getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-     onAuthStateChanged, signOut } = U);
-  ({ getDatabase } = D);
-  dbRef = D.ref; dbSet = D.set; dbGet = D.get; dbOnValue = D.onValue;
-  dbPush = D.push; dbRemove = D.remove; dbUpdate = D.update;
-  SDK_OK = true;
-} catch(e) { console.warn("Firebase SDK:", e.message); }
-
-/* ══ نفس الـ config بتاع موقع العملاء ══ */
-const firebaseConfig = {
-  apiKey: "AIzaSyDLITKrl4-6zq4CWn02sZb_T4OwZ4FmxIU",
-  authDomain: "mohamed-a9564.firebaseapp.com",
-  databaseURL: "https://mohamed-a9564-default-rtdb.firebaseio.com",
-  projectId: "mohamed-a9564",
-  messagingSenderId: "748841565210",
-  appId: "1:748841565210:web:cf52c50870ba5c7ab265a3"
-};
-  
-const FB = { app:null, auth:null, db:null, provisionerAuth:null, ok:false };
-let firebaseAuthError = "";
-if(SDK_OK) {
-  try {
-    FB.app  = initializeApp(firebaseConfig, "admin");
-    FB.auth = getAuth(FB.app);
-    FB.db   = getDatabase(FB.app);
-    const provisionerApp = initializeApp(firebaseConfig, "admin-provisioner");
-    FB.provisionerAuth = getAuth(provisionerApp);
-    FB.ok   = true;
-  } catch(e) { console.warn("Firebase init:", e.message); }
-}
+  ({ createClient } = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm"));
+  SB.client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  SB.ok = true;
+} catch(e) { console.warn("Supabase init:", e.message); }
 
 /* ─── 2. LOCAL ADMIN AUTH ─── */
 const ADMIN_ACCOUNTS = {
@@ -407,7 +373,7 @@ const ADMIN_ACCOUNTS = {
 const A = {
   user: null,
   tab: "dashboard",
-  products: [],          // from Firebase or local
+  products: [],          // from Supabase or local
   orders: [],            // aggregated from all users
   customers: [],
   coupons: {},
@@ -439,34 +405,88 @@ function toast(msg, type="ok") {
   setTimeout(() => { el.style.transition="opacity .4s"; el.style.opacity="0"; setTimeout(()=>el.remove(),400); }, 2800);
 }
 
-/* ─── 5. FIREBASE DB HELPERS ─── */
+/* ─── 5. SUPABASE DATA HELPERS ─── */
 async function dbWrite(path, value) {
-  if(FB.ok) {
-    try { await dbSet(dbRef(FB.db, path), value); return true; }
-    catch(e) { console.warn("[DB write]", e.message); }
-  }
-  // local fallback
-  const d = JSON.parse(localStorage.getItem("au_admin_db")||"{}");
-  const k = path.split("/"); let cur = d;
-  k.forEach((seg,i)=>{ if(i===k.length-1) cur[seg]=value; else cur=(cur[seg]=cur[seg]||{}); });
-  localStorage.setItem("au_admin_db", JSON.stringify(d));
-  return false;
+  if(!SB.ok) return false;
+  try {
+    const parts = path.split("/");
+    if(path === "coupons") {
+      const rows = Object.entries(value).map(([code, data]) => ({ code, data }));
+      const { error } = await SB.client.from("coupons").upsert(rows);
+      if(error) throw error;
+    } else if(path === "settings") {
+      const { error } = await SB.client.from("settings").upsert({ id:"store", data:value });
+      if(error) throw error;
+    } else if(parts[0] === "products" && parts[1]) {
+      const { error } = await SB.client.from("products").upsert({ id:parts[1], data:value });
+      if(error) throw error;
+    } else if(parts[0] === "users" && parts[1] && parts[2] === "orders") {
+      const { data: row, error: readError } = await SB.client.from("orders")
+        .select("data").eq("user_id", parts[1]).eq("order_key", parts[3]).maybeSingle();
+      if(readError) throw readError;
+      const nextData = {...(row?.data||{}), [parts[4]]:value};
+      const { error } = await SB.client.from("orders").upsert({ user_id:parts[1], order_key:parts[3], data:nextData });
+      if(error) throw error;
+    }
+    return true;
+  } catch(e) { console.warn("[Supabase write]", e.message); return false; }
 }
+
 async function dbRead(path) {
-  if(FB.ok) {
-    try { const s = await dbGet(dbRef(FB.db, path)); return s.exists()?s.val():null; }
-    catch(e) { console.warn("[DB read]", e.message); }
-  }
-  const d = JSON.parse(localStorage.getItem("au_admin_db")||"{}");
-  return path.split("/").reduce((a,k)=>a?.[k], d) ?? null;
+  if(!SB.ok) return null;
+  try {
+    if(path === "products") {
+      const { data, error } = await SB.client.from("products").select("id,data");
+      if(error) throw error;
+      return Object.fromEntries((data||[]).map(row => [row.id, row.data]));
+    }
+    if(path === "users") {
+      const [{data: users, error: usersError}, {data: orders, error: ordersError}] = await Promise.all([
+        SB.client.from("users").select("id,data"),
+        SB.client.from("orders").select("user_id,order_key,data")
+      ]);
+      if(usersError) throw usersError;
+      if(ordersError) throw ordersError;
+      const result = Object.fromEntries((users||[]).map(row => [row.id, {...(row.data||{}), orders:{}}]));
+      (orders||[]).forEach(row => { (result[row.user_id] ||= {orders:{}}).orders[row.order_key] = row.data; });
+      return result;
+    }
+    if(path.startsWith("users/") && path.endsWith("/orders")) {
+      const userId = path.split("/")[1];
+      const { data, error } = await SB.client.from("orders").select("order_key,data").eq("user_id", userId);
+      if(error) throw error;
+      return Object.fromEntries((data||[]).map(row => [row.order_key, row.data]));
+    }
+    if(path === "coupons") {
+      const { data, error } = await SB.client.from("coupons").select("code,data");
+      if(error) throw error;
+      return Object.fromEntries((data||[]).map(row => [row.code, row.data]));
+    }
+    if(path === "settings") {
+      const { data, error } = await SB.client.from("settings").select("data").eq("id","store").maybeSingle();
+      if(error) throw error;
+      return data?.data || null;
+    }
+    if(path.startsWith("admins/")) {
+      const { data, error } = await SB.client.from("admins").select("id,email,name,role").eq("id",path.split("/")[1]).maybeSingle();
+      if(error) throw error;
+      return data;
+    }
+  } catch(e) { console.warn("[Supabase read]", e.message); }
+  return null;
 }
+
 async function dbDel(path) {
-  if(FB.ok) { try { await dbRemove(dbRef(FB.db, path)); return; } catch(e) {} }
-  const d = JSON.parse(localStorage.getItem("au_admin_db")||"{}");
-  const k = path.split("/"); let cur = d;
-  k.slice(0,-1).forEach(s=>cur=cur?.[s]);
-  if(cur) delete cur[k[k.length-1]];
-  localStorage.setItem("au_admin_db", JSON.stringify(d));
+  if(!SB.ok) return false;
+  try {
+    const parts = path.split("/");
+    if(parts[0] === "products" && parts[1]) {
+      const { error } = await SB.client.from("products").delete().eq("id",parts[1]);
+      if(error) throw error;
+      return true;
+    }
+  } catch(e) { console.warn("[Supabase delete]", e.message); }
+  return false;
 }
 
 /* ─── 6. ADMIN LOGIN ─── */
@@ -479,41 +499,36 @@ window.adminLogin = async function() {
   btn.textContent = "جاري التحقق...";
   btn.disabled = true;
 
-  // check local admin accounts first
+  // check local admin accounts first, then try Supabase Auth
   const localAdmin = ADMIN_ACCOUNTS[email.toLowerCase()];
   if(localAdmin && localAdmin.pass === pass) {
-    let firebaseUser = null;
-    if(FB.ok) {
-      try {
-        firebaseUser = (await signInWithEmailAndPassword(FB.auth, email, pass)).user;
-      } catch(e) {
-        firebaseAuthError = e?.code === "auth/api-key-not-valid"
-          ? "مفتاح Firebase غير صالح أو تم تعطيله"
-          : e?.message || "تعذر الاتصال بـ Firebase Authentication";
-        console.warn("[Firebase admin login]", firebaseAuthError);
-      }
+    let supabaseUser = null;
+    if(SB.ok) {
+      const { data, error } = await SB.client.auth.signInWithPassword({ email, password:pass });
+      if(!error) supabaseUser = data.user;
+      else console.warn("[Supabase admin login]", error.message);
     }
-    A.user = { email, name: localAdmin.name, role: localAdmin.role, uid: firebaseUser?.uid };
+    A.user = { email, name: localAdmin.name, role: localAdmin.role, uid: supabaseUser?.id };
     showAdminApp();
     btn.textContent = "دخول للوحة الإدارة";
     btn.disabled = false;
     return;
   }
 
-  // try Firebase admin check
-  if(FB.ok) {
+  // try Supabase admin check
+  if(SB.ok) {
     try {
-      const cred = await signInWithEmailAndPassword(FB.auth, email, pass);
-      // check if user is admin in DB
-      const adminData = await dbRead("admins/" + cred.user.uid);
+      const { data, error } = await SB.client.auth.signInWithPassword({ email, password:pass });
+      if(error) throw error;
+      const adminData = await dbRead("admins/" + data.user.id);
       if(adminData) {
-        A.user = { email, name: adminData.name||email.split("@")[0], role: adminData.role||"admin", uid: cred.user.uid };
+        A.user = { email, name: adminData.name||email.split("@")[0], role: adminData.role||"admin", uid: data.user.id };
         showAdminApp();
         btn.textContent = "دخول للوحة الإدارة";
         btn.disabled = false;
         return;
       } else {
-        await signOut(FB.auth);
+        await SB.client.auth.signOut();
         errEl.textContent = "هذا الحساب ليس له صلاحية الوصول للوحة الإدارة";
         errEl.hidden = false;
       }
@@ -531,7 +546,7 @@ window.adminLogin = async function() {
 };
 
 window.adminLogout = function() {
-  if(FB.ok) signOut(FB.auth).catch(()=>{});
+  if(SB.ok) SB.client.auth.signOut().catch(()=>{});
   A.user = null;
   document.getElementById("loginScreen").hidden = false;
   document.getElementById("adminApp").hidden = true;
@@ -557,7 +572,7 @@ window.refreshData = loadAllData;
 
 /* ─── 7a. PRODUCTS ─── */
 async function loadProducts() {
-  // Try Firebase first
+  // Try Supabase first
   let data = await dbRead("products");
   if(data) {
     A.products = Object.entries(data)
@@ -1097,7 +1112,7 @@ function renderSettings() {
     </div>
 
     <div class="card p-6 space-y-4">
-      <h3 class="font-semibold text-[#E8DDD0] border-b pb-3" style="border-color:rgba(201,169,97,.12)">إضافة أدمن جديد (Firebase)</h3>
+      <h3 class="font-semibold text-[#E8DDD0] border-b pb-3" style="border-color:rgba(201,169,97,.12)">إضافة أدمن جديد (Supabase)</h3>
       <div><label class="lbl">البريد الإلكتروني</label><input id="newAdminEmail" class="field" placeholder="newadmin@lumiere.com"></div>
       <div><label class="lbl">كلمة المرور</label><input id="newAdminPass" class="field" type="password" placeholder="••••••••"></div>
       <div><label class="lbl">الاسم</label><input id="newAdminName" class="field" placeholder="اسم المدير"></div>
@@ -1204,12 +1219,12 @@ window.saveProduct = async function() {
     updatedAt: Date.now()
   };
 
-  // Save to Firebase
+  // Save to Supabase
   const saved = await dbWrite("products/" + pid, product);
-  if(FB.ok && !saved) {
+  if(SB.ok && !saved) {
     saveButton.disabled = false;
     saveButton.textContent = "حفظ المنتج";
-    return toast("تعذر حفظ المنتج في Firebase. تحقق من صلاحيات الحساب.", "err");
+    return toast("تعذر حفظ المنتج في Supabase. تحقق من الجداول وسياسات RLS.", "err");
   }
 
   // Update local state
@@ -1364,13 +1379,15 @@ window.createAdmin = async function() {
   const pass  = document.getElementById("newAdminPass").value;
   const name  = document.getElementById("newAdminName").value.trim();
   if(!email||!pass||!name) return toast("الرجاء إدخال جميع البيانات", "err");
-  if(firebaseAuthError) return toast("لا يمكن إنشاء مسؤول: " + firebaseAuthError, "err");
-  if(!FB.ok || !FB.auth?.currentUser) return toast("سجّل الدخول بحساب Firebase أولاً لإنشاء مسؤول سحابي", "err");
+  if(!SB.ok) return toast("Supabase غير متصل", "err");
+  const { data: session } = await SB.client.auth.getSession();
+  if(!session.session?.user) return toast("سجّل الدخول بحساب Supabase أولاً لإنشاء مسؤول", "err");
   try {
-    const auth = FB.provisionerAuth || FB.auth;
-    const c = await createUserWithEmailAndPassword(auth, email, pass);
-    await dbWrite("admins/" + c.user.uid, { name, email, role:"admin", createdAt:Date.now() });
-    if(auth !== FB.auth) await signOut(auth);
+    const { data, error } = await SB.client.auth.signUp({ email, password:pass });
+    if(error) throw error;
+    if(!data.user) throw new Error("لم يتم إنشاء مستخدم Supabase");
+    const { error: adminError } = await SB.client.from("admins").insert({ id:data.user.id, email, name, role:"admin" });
+    if(adminError) throw adminError;
     toast("✅ تم إنشاء حساب الأدمن: " + email);
     document.getElementById("newAdminEmail").value = "";
     document.getElementById("newAdminPass").value = "";
@@ -1380,16 +1397,15 @@ window.createAdmin = async function() {
 
 /* ─── 19. REAL-TIME LISTENERS ─── */
 function startRealtimeListeners() {
-  if(!FB.ok || !A.user?.uid || realtimeListenersStarted) return;
+  if(!SB.ok || !A.user?.uid || realtimeListenersStarted) return;
   realtimeListenersStarted = true;
-  // Listen for new orders in real-time
   try {
-    dbOnValue(dbRef(FB.db, "users"), snap => {
-      if(!snap.exists()) return;
-      const data = snap.val();
+    const channel = SB.client.channel("admin-data");
+    channel.on("postgres_changes", { event:"*", schema:"public", table:"users" }, async () => {
+      const data = await dbRead("users");
       const newOrders = [];
       const newCustomers = [];
-      Object.entries(data).forEach(([uid, u]) => {
+      Object.entries(data||{}).forEach(([uid, u]) => {
         newCustomers.push({ uid, name:u.name||"—", email:u.email||"—", phone:u.phone||"—",
           phoneVerified:u.phoneVerified||false, createdAt:u.createdAt||0,
           ordersCount:u.orders?Object.keys(u.orders).length:0 });
@@ -1409,18 +1425,15 @@ function startRealtimeListeners() {
         if(A.tab==="orders"||A.tab==="dashboard") renderTab();
       }
     });
-
-    // Listen for product changes
-    dbOnValue(dbRef(FB.db, "products"), snap => {
-      if(snap.exists()) {
-        A.products = Object.entries(snap.val())
+    channel.on("postgres_changes", { event:"*", schema:"public", table:"products" }, async () => {
+        const products = await dbRead("products");
+        A.products = Object.entries(products||{})
           .filter(([, val]) => val)
           .map(([key, val]) => normalizeProduct(val, key));
         A.stats.products = A.products.length;
         document.getElementById("prodBadge").textContent = A.products.length;
         if(A.tab==="products") renderTab();
-      }
-    });
+    }).subscribe();
   } catch(e) { console.warn("Realtime listeners:", e.message); }
 }
 
