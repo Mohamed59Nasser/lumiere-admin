@@ -218,10 +218,10 @@ label.lbl { font-size: .68rem; letter-spacing: .15em; text-transform: uppercase;
 
       <!-- Images -->
       <div>
-        <label class="lbl">صور المنتج (روابط)</label>
-        <input id="pImg1" class="field mb-2" placeholder="رابط الصورة الأولى https://...">
-        <input id="pImg2" class="field" placeholder="رابط الصورة الثانية (اختياري)">
-        <div id="imgPreview" class="flex gap-3 mt-3"></div>
+        <label class="lbl">صور المنتج</label>
+        <input id="pImages" class="field" type="file" accept="image/*" multiple>
+        <p class="text-[.65rem] mt-2" style="color:#7A6A52">اختَر أي عدد من الصور، وسيتم رفعها تلقائياً إلى Firebase.</p>
+        <div id="imgPreview" class="grid grid-cols-3 sm:grid-cols-5 gap-3 mt-3"></div>
       </div>
 
       <!-- Names -->
@@ -358,13 +358,15 @@ label.lbl { font-size: .68rem; letter-spacing: .15em; text-transform: uppercase;
 const V = "https://www.gstatic.com/firebasejs/10.12.2";
 let initializeApp, getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword,
     onAuthStateChanged, signOut, getDatabase, dbRef, dbSet, dbGet, dbOnValue,
-    dbPush, dbRemove, dbUpdate, SDK_OK = false;
+    dbPush, dbRemove, dbUpdate, getStorage, storageRef, uploadBytes, getDownloadURL,
+    deleteObject, SDK_OK = false;
 
 try {
-  const [A, U, D] = await Promise.all([
+  const [A, U, D, S] = await Promise.all([
     import(`${V}/firebase-app.js`),
     import(`${V}/firebase-auth.js`),
-    import(`${V}/firebase-database.js`)
+    import(`${V}/firebase-database.js`),
+    import(`${V}/firebase-storage.js`)
   ]);
   ({ initializeApp } = A);
   ({ getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -372,6 +374,7 @@ try {
   ({ getDatabase } = D);
   dbRef = D.ref; dbSet = D.set; dbGet = D.get; dbOnValue = D.onValue;
   dbPush = D.push; dbRemove = D.remove; dbUpdate = D.update;
+  ({ getStorage, ref: storageRef, uploadBytes, getDownloadURL, deleteObject } = S);
   SDK_OK = true;
 } catch(e) { console.warn("Firebase SDK:", e.message); }
 
@@ -386,12 +389,13 @@ const firebaseConfig = {
   appId: "1:748841565210:web:cf52c50870ba5c7ab265a3"
 };
   
-const FB = { app:null, auth:null, db:null, ok:false };
+const FB = { app:null, auth:null, db:null, storage:null, ok:false };
 if(SDK_OK) {
   try {
     FB.app  = initializeApp(firebaseConfig, "admin");
     FB.auth = getAuth(FB.app);
     FB.db   = getDatabase(FB.app);
+    FB.storage = getStorage(FB.app);
     FB.ok   = true;
   } catch(e) { console.warn("Firebase init:", e.message); }
 }
@@ -414,6 +418,8 @@ const A = {
   stats: { revenue: 0, orders: 0, customers: 0, products: 0 }
 };
 let realtimeListenersStarted = false;
+let pendingImageFiles = [];
+let productImageUrls = [];
 
 /* ─── 4. HELPERS ─── */
 const money = n => new Intl.NumberFormat('ar-EG-u-nu-latn').format(Math.round(n)) + " جنيه";
@@ -1102,8 +1108,9 @@ window.openProductModal = function(pid=null) {
   document.getElementById("modalTitle").textContent = pid ? "تعديل المنتج" : "إضافة منتج جديد";
   const p = pid ? A.products.find(x=>x.id===pid) : null;
   document.getElementById("editProductId").value = pid||"";
-  document.getElementById("pImg1").value = p?.img?.[0]||"";
-  document.getElementById("pImg2").value = p?.img?.[1]||"";
+  document.getElementById("pImages").value = "";
+  pendingImageFiles = [];
+  productImageUrls = [...(p?.img||[])];
   document.getElementById("pNameEn").value = p?.en?.n||"";
   document.getElementById("pNameAr").value = p?.ar?.n||"";
   document.getElementById("pSubEn").value = p?.en?.s||"";
@@ -1130,27 +1137,72 @@ window.closeProductModal = function() {
 };
 
 window.updateImgPreview = function() {
-  const img1 = document.getElementById("pImg1").value;
-  const img2 = document.getElementById("pImg2").value;
   const prev = document.getElementById("imgPreview");
-  prev.innerHTML = [img1,img2].filter(Boolean).map(url=>`
-    <img src="${esc(url)}" class="w-20 h-20 rounded-xl object-cover border" style="border-color:rgba(201,169,97,.2)" onerror="this.style.opacity='.2'">`).join("");
+  const existing = productImageUrls.map((url, index) => `
+    <div class="relative aspect-square">
+      <img src="${esc(url)}" class="w-full h-full rounded-xl object-cover border" style="border-color:rgba(201,169,97,.2)" onerror="this.style.opacity='.2'">
+      <button type="button" onclick="removeProductImage(${index})" class="absolute top-1 end-1 w-6 h-6 rounded-full text-xs" style="background:rgba(180,60,60,.9);color:#fff">×</button>
+    </div>`).join("");
+  const selected = pendingImageFiles.map((file, index) => `
+    <div class="relative aspect-square">
+      <img src="${URL.createObjectURL(file)}" class="w-full h-full rounded-xl object-cover border" style="border-color:rgba(201,169,97,.2)">
+      <button type="button" onclick="removePendingImage(${index})" class="absolute top-1 end-1 w-6 h-6 rounded-full text-xs" style="background:rgba(180,60,60,.9);color:#fff">×</button>
+    </div>`).join("");
+  prev.innerHTML = existing + selected;
 };
 
-["pImg1","pImg2"].forEach(id=>{
-  setTimeout(()=>{ const el=document.getElementById(id); if(el) el.oninput=updateImgPreview; },500);
+window.removeProductImage = function(index) {
+  productImageUrls.splice(index, 1);
+  updateImgPreview();
+};
+
+window.removePendingImage = function(index) {
+  pendingImageFiles.splice(index, 1);
+  updateImgPreview();
+};
+
+document.getElementById("pImages").addEventListener("change", event => {
+  const files = [...event.target.files];
+  const invalid = files.find(file => !file.type.startsWith("image/") || file.size > 10 * 1024 * 1024);
+  if(invalid) {
+    toast("كل صورة يجب أن تكون بصيغة صور وحجمها أقل من 10 ميجابايت", "err");
+  } else {
+    pendingImageFiles.push(...files);
+  }
+  event.target.value = "";
+  updateImgPreview();
 });
+
+async function uploadProductImages(pid) {
+  if(!pendingImageFiles.length) return [];
+  if(!FB.ok || !FB.storage) throw new Error("Firebase Storage غير متاح");
+  const uploaded = [];
+  for(const file of pendingImageFiles) {
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+    const imageRef = storageRef(FB.storage, `products/${pid}/${Date.now()}-${uid()}-${safeName}`);
+    const snapshot = await uploadBytes(imageRef, file, { contentType: file.type });
+    uploaded.push(await getDownloadURL(snapshot.ref));
+  }
+  return uploaded;
+}
 
 window.saveProduct = async function() {
   const pid = document.getElementById("editProductId").value || "au_" + uid();
-  const img1 = document.getElementById("pImg1").value.trim();
-  const img2 = document.getElementById("pImg2").value.trim();
   const price = parseFloat(document.getElementById("pPrice").value)||0;
 
-  if(!img1) return toast("الرجاء إدخال رابط صورة المنتج", "err");
+  if(!productImageUrls.length && !pendingImageFiles.length) return toast("الرجاء اختيار صورة واحدة على الأقل", "err");
   if(!document.getElementById("pNameEn").value.trim()) return toast("الرجاء إدخال الاسم بالإنجليزية", "err");
   if(!document.getElementById("pNameAr").value.trim()) return toast("الرجاء إدخال الاسم بالعربية", "err");
   if(!price) return toast("الرجاء إدخال السعر", "err");
+
+  let uploadedImages;
+  try {
+    toast("جاري رفع الصور...", "info");
+    uploadedImages = await uploadProductImages(pid);
+  } catch(e) {
+    console.warn("[Storage upload]", e);
+    return toast("تعذر رفع الصور: " + (e.message||"تحقق من اتصال Firebase"), "err");
+  }
 
   const product = {
     id: pid,
@@ -1170,7 +1222,7 @@ window.saveProduct = async function() {
       s: document.getElementById("pSubAr").value.trim(),
       d: document.getElementById("pDescAr").value.trim()
     },
-    img: [img1, img2].filter(Boolean),
+    img: [...productImageUrls, ...uploadedImages],
     mat: { en: document.getElementById("pMatEn").value.trim(), ar: document.getElementById("pMatAr").value.trim() },
     stone: { en: document.getElementById("pStoneEn").value.trim(), ar: document.getElementById("pStoneAr").value.trim() },
     sizes: document.getElementById("pSizes").value.split(",").map(s=>s.trim()).filter(Boolean),
