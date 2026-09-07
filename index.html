@@ -309,7 +309,7 @@ label.lbl { font-size: .68rem; letter-spacing: .15em; text-transform: uppercase;
     </div>
 
     <div class="flex gap-3 p-6 border-t" style="border-color:rgba(201,169,97,.12)">
-      <button onclick="saveProduct()" class="btn-gold flex-1 rounded-xl py-3 text-[.68rem] uppercase">حفظ المنتج</button>
+      <button id="saveProductBtn" onclick="saveProduct()" class="btn-gold flex-1 rounded-xl py-3 text-[.68rem] uppercase">حفظ المنتج</button>
       <button onclick="closeProductModal()" class="btn-ghost rounded-xl px-6 py-3 text-[.68rem] uppercase">إلغاء</button>
     </div>
   </div>
@@ -1176,17 +1176,22 @@ document.getElementById("pImages").addEventListener("change", event => {
 async function uploadProductImages(pid) {
   if(!pendingImageFiles.length) return [];
   if(!FB.ok || !FB.storage) throw new Error("Firebase Storage غير متاح");
+  if(!FB.auth?.currentUser) throw new Error("يجب تسجيل الدخول بحساب Firebase لرفع الصور");
   const uploaded = [];
   for(const file of pendingImageFiles) {
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
     const imageRef = storageRef(FB.storage, `products/${pid}/${Date.now()}-${uid()}-${safeName}`);
-    const snapshot = await uploadBytes(imageRef, file, { contentType: file.type });
+    const snapshot = await Promise.race([
+      uploadBytes(imageRef, file, { contentType: file.type }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("انتهت مهلة رفع الصورة")), 30000))
+    ]);
     uploaded.push(await getDownloadURL(snapshot.ref));
   }
   return uploaded;
 }
 
 window.saveProduct = async function() {
+  const saveButton = document.getElementById("saveProductBtn");
   const pid = document.getElementById("editProductId").value || "au_" + uid();
   const price = parseFloat(document.getElementById("pPrice").value)||0;
 
@@ -1195,13 +1200,20 @@ window.saveProduct = async function() {
   if(!document.getElementById("pNameAr").value.trim()) return toast("الرجاء إدخال الاسم بالعربية", "err");
   if(!price) return toast("الرجاء إدخال السعر", "err");
 
+  saveButton.disabled = true;
+  saveButton.textContent = "جاري الحفظ...";
   let uploadedImages;
   try {
-    toast("جاري رفع الصور...", "info");
+    if(pendingImageFiles.length) {
+      saveButton.textContent = "جاري رفع الصور...";
+      toast("جاري رفع الصور...", "info");
+    }
     uploadedImages = await uploadProductImages(pid);
   } catch(e) {
     console.warn("[Storage upload]", e);
-    return toast("تعذر رفع الصور: " + (e.message||"تحقق من اتصال Firebase"), "err");
+    saveButton.disabled = false;
+    saveButton.textContent = "حفظ المنتج";
+    return toast("تعذر رفع الصور: " + (e.message||"تحقق من اتصال Firebase Storage"), "err");
   }
 
   const product = {
@@ -1230,7 +1242,12 @@ window.saveProduct = async function() {
   };
 
   // Save to Firebase
-  await dbWrite("products/" + pid, product);
+  const saved = await dbWrite("products/" + pid, product);
+  if(FB.ok && !saved) {
+    saveButton.disabled = false;
+    saveButton.textContent = "حفظ المنتج";
+    return toast("تعذر حفظ المنتج في Firebase. تحقق من صلاحيات الحساب.", "err");
+  }
 
   // Update local state
   const idx = A.products.findIndex(p=>p.id===pid);
