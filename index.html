@@ -389,13 +389,16 @@ const firebaseConfig = {
   appId: "1:748841565210:web:cf52c50870ba5c7ab265a3"
 };
   
-const FB = { app:null, auth:null, db:null, storage:null, ok:false };
+const FB = { app:null, auth:null, db:null, storage:null, provisionerAuth:null, ok:false };
+let firebaseAuthError = "";
 if(SDK_OK) {
   try {
     FB.app  = initializeApp(firebaseConfig, "admin");
     FB.auth = getAuth(FB.app);
     FB.db   = getDatabase(FB.app);
     FB.storage = getStorage(FB.app);
+    const provisionerApp = initializeApp(firebaseConfig, "admin-provisioner");
+    FB.provisionerAuth = getAuth(provisionerApp);
     FB.ok   = true;
   } catch(e) { console.warn("Firebase init:", e.message); }
 }
@@ -485,7 +488,18 @@ window.adminLogin = async function() {
   // check local admin accounts first
   const localAdmin = ADMIN_ACCOUNTS[email.toLowerCase()];
   if(localAdmin && localAdmin.pass === pass) {
-    A.user = { email, name: localAdmin.name, role: localAdmin.role };
+    let firebaseUser = null;
+    if(FB.ok) {
+      try {
+        firebaseUser = (await signInWithEmailAndPassword(FB.auth, email, pass)).user;
+      } catch(e) {
+        firebaseAuthError = e?.code === "auth/api-key-not-valid"
+          ? "مفتاح Firebase غير صالح أو تم تعطيله"
+          : e?.message || "تعذر الاتصال بـ Firebase Authentication";
+        console.warn("[Firebase admin login]", firebaseAuthError);
+      }
+    }
+    A.user = { email, name: localAdmin.name, role: localAdmin.role, uid: firebaseUser?.uid };
     showAdminApp();
     btn.textContent = "دخول للوحة الإدارة";
     btn.disabled = false;
@@ -1175,7 +1189,7 @@ document.getElementById("pImages").addEventListener("change", event => {
 
 async function uploadProductImages(pid) {
   if(!pendingImageFiles.length) return [];
-  if(!FB.ok || !FB.storage) throw new Error("Firebase Storage غير متاح");
+  if(!FB.ok || !FB.storage) throw new Error("Firebase Storage غير مفعّل في المشروع");
   if(!FB.auth?.currentUser) throw new Error("يجب تسجيل الدخول بحساب Firebase لرفع الصور");
   const uploaded = [];
   for(const file of pendingImageFiles) {
@@ -1401,10 +1415,13 @@ window.createAdmin = async function() {
   const pass  = document.getElementById("newAdminPass").value;
   const name  = document.getElementById("newAdminName").value.trim();
   if(!email||!pass||!name) return toast("الرجاء إدخال جميع البيانات", "err");
-  if(!FB.ok) return toast("Firebase غير متصل — استخدم الحسابات المحلية", "err");
+  if(firebaseAuthError) return toast("لا يمكن إنشاء مسؤول: " + firebaseAuthError, "err");
+  if(!FB.ok || !FB.auth?.currentUser) return toast("سجّل الدخول بحساب Firebase أولاً لإنشاء مسؤول سحابي", "err");
   try {
-    const c = await createUserWithEmailAndPassword(FB.auth, email, pass);
+    const auth = FB.provisionerAuth || FB.auth;
+    const c = await createUserWithEmailAndPassword(auth, email, pass);
     await dbWrite("admins/" + c.user.uid, { name, email, role:"admin", createdAt:Date.now() });
+    if(auth !== FB.auth) await signOut(auth);
     toast("✅ تم إنشاء حساب الأدمن: " + email);
     document.getElementById("newAdminEmail").value = "";
     document.getElementById("newAdminPass").value = "";
