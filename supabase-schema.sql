@@ -93,7 +93,7 @@ create policy "Admins insert admins" on public.admins for insert to authenticate
 
 -- Make the existing Supabase account an administrator after the schema is created.
 insert into public.admins (id, email, name, role)
-select id, email, 'مدير النظام', 'super'
+select id, email, 'مدير النظام', 'super_admin'
 from auth.users
 where lower(email) = lower('5599mohamednasser5599@gmail.com')
 on conflict (id) do update
