@@ -490,6 +490,27 @@ async function dbDel(path) {
 }
 
 /* ─── 6. ADMIN LOGIN ─── */
+function explainLoginError(error) {
+  const code = error?.code || "";
+  const message = String(error?.message || "").toLowerCase();
+  if(error?.status === 429 || message.includes("rate limit")) {
+    return "تم تجاوز عدد محاولات الدخول. انتظر قليلاً ثم جرّب مرة أخرى.";
+  }
+  if(code === "invalid_credentials" || message.includes("invalid login credentials")) {
+    return "البريد الإلكتروني أو كلمة المرور غير صحيحة. تأكد من كتابتهما كما هما في Supabase.";
+  }
+  if(code === "email_not_confirmed" || message.includes("email not confirmed")) {
+    return "الحساب موجود، لكن البريد الإلكتروني غير مؤكد. افتح رسالة Supabase وأكد البريد أولاً.";
+  }
+  if(code === "user_not_found" || message.includes("user not found")) {
+    return "لا يوجد حساب بهذا البريد في Supabase Authentication.";
+  }
+  if(message.includes("api key") || message.includes("project not found")) {
+    return "إعدادات Supabase غير صحيحة: Project URL أو Public Key غير صالح.";
+  }
+  return `تعذر تسجيل الدخول: ${error?.message || "خطأ غير معروف من Supabase"}`;
+}
+
 window.adminLogin = async function() {
   const email = document.getElementById("adminEmail").value.trim();
   const pass  = document.getElementById("adminPass").value;
@@ -514,7 +535,15 @@ window.adminLogin = async function() {
     try {
       const { data, error } = await SB.client.auth.signInWithPassword({ email, password:pass });
       if(error) throw error;
-      const adminData = await dbRead("admins/" + data.user.id);
+      const { data: adminData, error: adminError } = await SB.client
+        .from("admins")
+        .select("id,email,name,role")
+        .eq("id", data.user.id)
+        .maybeSingle();
+      if(adminError) {
+        await SB.client.auth.signOut().catch(() => {});
+        throw new Error("جدول admins غير متاح أو لم يتم تنفيذ supabase-schema.sql في المشروع.");
+      }
       if(adminData) {
         A.user = { email, name: adminData.name||email.split("@")[0], role: adminData.role||"admin", uid: data.user.id };
         showAdminApp();
@@ -522,18 +551,16 @@ window.adminLogin = async function() {
         btn.disabled = false;
         return;
       } else {
-        await SB.client.auth.signOut();
+        await SB.client.auth.signOut().catch(() => {});
         errEl.textContent = "هذا الحساب ليس له صلاحية الوصول للوحة الإدارة";
         errEl.hidden = false;
       }
     } catch(e) {
-      errEl.textContent = e?.status === 429 || e?.message?.toLowerCase().includes("rate limit")
-        ? "تم تجاوز حد محاولات الدخول مؤقتاً، انتظر قليلاً ثم حاول مرة أخرى"
-        : "بيانات الدخول غير صحيحة";
+      errEl.textContent = explainLoginError(e);
       errEl.hidden = false;
     }
   } else {
-    errEl.textContent = "بيانات الدخول غير صحيحة";
+    errEl.textContent = "تعذر الاتصال بـ Supabase. راجع Project URL وPublic Key.";
     errEl.hidden = false;
   }
 
