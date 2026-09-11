@@ -90,3 +90,13 @@ create policy "Admins read admins" on public.admins for select to authenticated
 drop policy if exists "Admins insert admins" on public.admins;
 create policy "Admins insert admins" on public.admins for insert to authenticated
   with check (exists (select 1 from public.admins where id = auth.uid()));
+
+-- Make the existing Supabase account an administrator after the schema is created.
+insert into public.admins (id, email, name, role)
+select id, email, 'مدير النظام', 'super'
+from auth.users
+where lower(email) = lower('5599mohamednasser5599@gmail.com')
+on conflict (id) do update
+set email = excluded.email,
+    name = excluded.name,
+    role = excluded.role;
